@@ -1,8 +1,7 @@
 """
-MILA - 100% FREE VERSION - NO OPENAI NEEDED
+MILA - Upgraded with HuggingFace AI + FREE Fallback
 MCNP-ISAP Library Virtual Assistant
 Facebook Page: Library Dev (1303250132873567)
-Deploy on Render.com FREE - no credit card, no API key needed
 """
 import os
 import re
@@ -13,8 +12,19 @@ app = Flask(__name__)
 
 PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "mila_verify_2024")
+HF_TOKEN = os.environ.get("HF_TOKEN") # <-- ADD THIS IN RENDER
 
-# KNOWLEDGE BASE - 100% from your FAQs
+# Optional HF - only loaded if token exists
+hf_client = None
+if HF_TOKEN:
+    try:
+        from huggingface_hub import InferenceClient
+        hf_client = InferenceClient(api_key=HF_TOKEN)
+        print("✅ HF Client ready")
+    except Exception as e:
+        print(f"HF init failed: {e}")
+
+# KNOWLEDGE BASE - same as yours
 FAQS = [
     {
         "keywords": ["hours", "open", "operating", "schedule", "what time open", "anong oras bukas"],
@@ -61,21 +71,66 @@ Just ask me like: "What are library hours?" or "How to get library card?" 😊
 
 For other concerns, please leave your full name, course/year, and concern — I'll forward it to admin!"""
 
-def find_answer(user_message):
+def find_best_faq(user_message):
     msg = user_message.lower()
     best_match = None
     best_score = 0
-    
     for faq in FAQS:
-        score = 0
-        for kw in faq["keywords"]:
-            if kw in msg:
-                score += 1
+        score = sum(1 for kw in faq["keywords"] if kw in msg)
         if score > best_score:
             best_score = score
             best_match = faq
-    
-    if best_match and best_score > 0:
+    return best_match, best_score
+
+def ask_huggingface(user_message, faq_context=""):
+    if not hf_client:
+        return None
+
+    # RAG: Give HF the FAQ as context so it doesn't hallucinate
+    system_prompt = f"""You are MILA, the MCNP-ISAP Library Virtual Assistant.
+Answer based ONLY on this library info. Be friendly, short, and use emojis.
+If question is outside library info, say you will forward to admin and ask for name/course/year.
+
+LIBRARY KNOWLEDGE:
+{faq_context}
+
+If no relevant knowledge, use this general info:
+- Hours: Mon-Fri 7AM-6PM, Sat 8AM-12PM
+- Borrow starts 3PM, return by 10AM due date
+- Fine: P1/hour or P10/day per book
+- Max 3 books (2 prof + 1 fiction, fiction 1 week only)
+- Cannot borrow: thesis, periodicals, newspaper
+- Card requirements: photocopy ID, passport pic, alphabetical list via class president
+- Lost card: report + P50 replacement
+- Claiming: wait for staff message
+"""
+    try:
+        completion = hf_client.chat.completions.create(
+            model="Qwen/Qwen2.5-7B-Instruct", # Free, fast, good for Tagalog/English
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=350,
+            temperature=0.6
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        print(f"HF Error: {e}")
+        return None
+
+def find_answer(user_message):
+    best_match, score = find_best_faq(user_message)
+    faq_context = best_match["answer"] if best_match else DEFAULT_ANSWER
+
+    # 1. Try Hugging Face AI first (if token set)
+    if hf_client:
+        ai_reply = ask_huggingface(user_message, faq_context)
+        if ai_reply:
+            return ai_reply
+
+    # 2. Fallback to keyword matching (100% free, always works)
+    if best_match and score > 0:
         return best_match["answer"]
     else:
         return DEFAULT_ANSWER
@@ -86,13 +141,12 @@ def send_message(recipient_id, text):
         return
     url = f"https://graph.facebook.com/v19.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
-    # Facebook limit is 2000 chars
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text[:1900]}
     }
     r = requests.post(url, params=params, json=payload)
-    print(f"Sent to {recipient_id}: {r.status_code} {r.text}")
+    print(f"Sent to {recipient_id}: {r.status_code}")
 
 @app.route("/", methods=['GET'])
 def verify():
@@ -102,7 +156,7 @@ def verify():
     if mode == "subscribe" and token == VERIFY_TOKEN:
         print("Webhook verified!")
         return challenge, 200
-    return "MILA FREE Bot for Library Dev (1303250132873567) is running 📚 - No OpenAI needed! Set webhook to / with VERIFY_TOKEN", 200
+    return "MILA Bot for Library Dev (1303250132873567) is running 📚 - HF AI + FAQ Fallback", 200
 
 @app.route("/", methods=['POST'])
 def webhook():
